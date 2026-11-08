@@ -20,7 +20,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 pydantic_ai.BANNER_ENABLED = False  # sin el aviso de Logfire en cada ejecución
 
 RAIZ = Path(__file__).resolve().parent  # la carpeta del proyecto
-DATOS = RAIZ / "datos"  # gastos.csv y documentos/*.pdf
+DATOS = RAIZ / "datos"  # siniestros.csv, documentos/*.pdf y la base siniestros.db
 
 
 class Settings(BaseSettings):

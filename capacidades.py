@@ -1,138 +1,158 @@
-"""Las capabilities de tu asistente: lo que vimos en clase. Cámbialas o agrega las tuyas.
+"""Las capabilities del agente de siniestros: tools + instrucciones.
 
-Una Capability junta tools + instrucciones en una pieza que se enchufa al agente (asistente.py).
 El docstring y los tipos de cada tool son lo único que el modelo lee para decidir cuándo usarla.
+Las operaciones sobre SQLite y los PDFs viven en siniestros.py; aquí solo se exponen como tools.
 """
 
-import csv
-import sqlite3
-from datetime import date
 from functools import cache
-from typing import Literal
 
 import chromadb
-import httpx
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
 from pydantic_ai.capabilities import Capability
 from pypdf import PdfReader
 
+import siniestros
 from config import DATOS, settings
+from siniestros import DenunciaNueva, Estado, EstadoInicial, Ramo
 
-# ═══ S1 · Tools de lectura con APIs públicas ══════════════════════════════════════════
-apis = Capability(
-    id="apis_publicas",
-    description="Consulta indicadores económicos (Banco Mundial) y clima (Open Meteo) con sus APIs públicas",
-    instructions="Usa las APIs para obtener datos reales. Si una API no tiene el dato, dilo, y no inventes datos",
+# ═══ Registro y seguimiento: las tools que escriben ══════════════════════════════════
+registro = Capability(
+    id="registro_siniestros",
+    description="Registra denuncias de siniestros y actualiza su estado en la base local SQLite",
+    instructions=[
+        "Usa registrar_siniestro SOLO después de mostrar el resumen de la denuncia y recibir "
+        "una confirmación explícita del usuario.",
+        "Nunca digas que una denuncia quedó registrada si la tool devolvió un error.",
+        "Si la tool avisa de un posible duplicado, informa al usuario y pide permiso antes de "
+        "repetir la llamada con confirmar_duplicado=True.",
+        "Cambia el estado solo cuando un usuario autorizado lo pida expresamente y explique el motivo; "
+        "la tool exige el usuario responsable y una observación.",
+    ],
 )
 
 
-@apis.tool_plain
-def inflacion(pais: str, anio: int) -> dict:
-    """Inflación anual de un país en un año, según el Banco Mundial.
+@registro.tool_plain
+def registrar_siniestro(
+    denuncia: DenunciaNueva,
+    estado_inicial: EstadoInicial = "REGISTRADO",
+    confirmar_duplicado: bool = False,
+) -> dict:
+    """Registra una denuncia de siniestro y devuelve su número único.
+
+    Antes de llamarla, muestra el resumen al usuario y espera su confirmación.
+    Si faltan datos obligatorios, la tool no guarda nada y devuelve la lista de faltantes:
+    pídelos o registra la denuncia como PENDIENTE_DE_INFORMACION.
 
     Args:
-        pais: código ISO del país, por ejemplo 'BO' para Bolivia o 'PE' para Perú
-        anio: año, por ejemplo 2024
+        denuncia: datos extraídos de la conversación (ramo, fecha, lugar, hechos, asegurado, etc.)
+        estado_inicial: REGISTRADO si la información mínima está completa; PENDIENTE_DE_INFORMACION si faltan datos
+        confirmar_duplicado: True solo si el usuario confirmó que, pese a la coincidencia, es otra denuncia
     """
-    url = f"https://api.worldbank.org/v2/country/{pais}/indicator/FP.CPI.TOTL.ZG"
-    respuesta = httpx.get(url, params={"date": anio, "format": "json"}, timeout=10)
-    respuesta.raise_for_status()
-    datos = respuesta.json()
-
-    # La API responde [metadatos, registros]. Si no hay dato, devolvemos un aviso que el modelo puede leer
-    if len(datos) < 2 or not datos[1] or datos[1][0]["value"] is None:
-        return {"error": f"No hay datos de inflación disponibles para {pais} en {anio}"}
-
-    registro = datos[1][0]
-    return {
-        "pais": registro["country"]["value"],
-        "anio": registro["date"],
-        "inflacion_pct": round(registro["value"], 2),
-        "fuente": "Banco Mundial",  # devolver la fuente evita que el modelo invente una
-    }
+    return siniestros.registrar(denuncia, estado_inicial, confirmar_duplicado)
 
 
-@apis.tool_plain
-def clima_cochabamba() -> dict:
-    """Temperatura actual de Cochabamba, según Open Meteo."""
-    params = {"latitude": -17.38, "longitude": -66.15, "current": "temperature_2m"}
-    respuesta = httpx.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=10)
-    respuesta.raise_for_status()
-    return {"temperatura": respuesta.json()["current"]["temperature_2m"], "fuente": "Open Meteo"}
+@registro.tool_plain
+def cambiar_estado(numero_siniestro: str, estado_nuevo: Estado, usuario: str, observacion: str) -> dict:
+    """Cambia el estado de una denuncia y deja el cambio en el historial.
+
+    Args:
+        numero_siniestro: número devuelto al registrar, por ejemplo 'SIN-2026-0001'
+        estado_nuevo: nuevo estado del siniestro
+        usuario: nombre o identificador del responsable autorizado del cambio
+        observacion: motivo o detalle del cambio (obligatorio)
+    """
+    return siniestros.cambiar_estado(numero_siniestro, estado_nuevo, usuario, observacion)
 
 
-# ═══ S1 · Mi contador: gastos en SQLite, una tool que lee y otra que escribe ══════════
-Categoria = Literal["transporte", "alimentacion", "educacion", "ocio", "salud"]
-CSV = DATOS / "gastos.csv"  # 10 gastos ficticios de mayo de 2030
-DB = DATOS / "gastos.db"  # la base: se crea desde el CSV la primera vez
-
-
-def crear_base() -> None:
-    """Crea gastos.db desde cero con los gastos del CSV."""
-    DB.unlink(missing_ok=True)
-    with CSV.open(encoding="utf-8") as archivo:
-        filas = [(g["fecha"], g["categoria"], g["descripcion"], float(g["monto"])) for g in csv.DictReader(archivo)]
-    conexion = sqlite3.connect(DB)
-    with conexion:
-        conexion.execute(
-            "CREATE TABLE gastos (fecha TEXT, categoria TEXT, descripcion TEXT, monto REAL CHECK (monto > 0))"
-        )
-        conexion.executemany("INSERT INTO gastos VALUES (?, ?, ?, ?)", filas)
-    conexion.close()
-
-
-def hoy() -> str:
-    """Instrucción dinámica: el modelo no sabe qué día es; se lo decimos en cada mensaje."""
-    return f"Hoy es {date.today().isoformat()}."
-
-
-# Lectura y escritura van en capabilities separadas: a otro agente le podrías dar solo la primera
+# ═══ Consulta: las tools que leen ════════════════════════════════════════════════════
 consulta = Capability(
-    id="consulta_gastos",
-    description="Consulta gastos personales almacenados en una base de datos SQLite",
-    instructions="Usa la base de datos para responder preguntas sobre los gastos. No inventes datos.",
-)
-registro = Capability(
-    id="registro_gastos",
-    description="Registra nuevos gastos en la base de datos SQLite",
-    instructions=["Agrega nuevos gastos a la base de datos. Asegúrate de que los datos sean válidos.", hoy],
+    id="consulta_siniestros",
+    description="Consulta denuncias de siniestros, sus datos, su historial y sus requisitos documentales",
+    instructions=(
+        "Usa buscar_siniestros para localizar denuncias y detalle_siniestro para ver una en concreto. "
+        "No inventes números, estados ni datos: si la tool no encuentra nada, dilo. "
+        "En los listados muestra solo la información necesaria y no reveles datos de otros asegurados."
+    ),
 )
 
 
 @consulta.tool_plain
-def consultar_gastos(categoria: Categoria) -> dict:
-    """Gastos de una categoría y su total en bolivianos."""
-    if not DB.exists():
-        crear_base()
-    conexion = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True)  # solo lectura
-    conexion.row_factory = sqlite3.Row  # cada fila como diccionario
-    filas = conexion.execute(
-        "SELECT fecha, descripcion, monto FROM gastos WHERE categoria = ?",  # SQL fijo; el valor va en ?
-        (categoria,),
-    ).fetchall()
-    conexion.close()
-    return {"categoria": categoria, "total_bs": sum(f["monto"] for f in filas), "gastos": [dict(f) for f in filas]}
+def buscar_siniestros(
+    numero_siniestro: str | None = None,
+    numero_poliza: str | None = None,
+    documento: str | None = None,
+    nombre: str | None = None,
+    fecha_siniestro: str | None = None,
+    ramo: Ramo | None = None,
+    tipo_seguro: str | None = None,
+    estado: Estado | None = None,
+) -> dict:
+    """Busca denuncias registradas. Devuelve una lista resumida.
+
+    Usa al menos un criterio. Si hay varios resultados, muéstralos y pregunta cuál desea consultar.
+
+    Args:
+        numero_siniestro: número de siniestro o parte de él, por ejemplo 'SIN-2026-0001'
+        numero_poliza: número de póliza o certificado
+        documento: documento de identidad del asegurado o del denunciante
+        nombre: nombre del asegurado o del denunciante
+        fecha_siniestro: fecha del siniestro en formato AAAA-MM-DD
+        ramo: ramo del seguro
+        tipo_seguro: nombre o parte del tipo de seguro
+        estado: estado actual de la denuncia
+    """
+    return siniestros.buscar(
+        numero_siniestro=numero_siniestro,
+        numero_poliza=numero_poliza,
+        documento=documento,
+        nombre=nombre,
+        fecha_siniestro=fecha_siniestro,
+        ramo=ramo,
+        tipo_seguro=tipo_seguro,
+        estado=estado,
+    )
 
 
-@registro.tool_plain
-def registrar_gasto(fecha: str, categoria: Categoria, descripcion: str, monto: float) -> str:
-    """Anota un gasto nuevo. La fecha va como AAAA-MM-DD y el monto en bolivianos."""
-    if not DB.exists():
-        crear_base()
-    conexion = sqlite3.connect(DB)  # sin mode=ro: esta tool sí escribe
-    try:
-        with conexion:  # transacción: guarda todo o nada
-            conexion.execute("INSERT INTO gastos VALUES (?, ?, ?, ?)", (fecha, categoria, descripcion, monto))
-    except sqlite3.IntegrityError:  # el CHECK de la tabla rechaza montos de 0 o negativos
-        return f"No se guardó: el monto debe ser mayor que 0 (recibí {monto})."
-    finally:
-        conexion.close()
-    return f"Gasto registrado: {descripcion}, {monto} Bs en {categoria} el {fecha}."
+@consulta.tool_plain
+def detalle_siniestro(numero_siniestro: str) -> dict:
+    """Todos los datos de una denuncia y su historial de estados.
+
+    Args:
+        numero_siniestro: número exacto, por ejemplo 'SIN-2026-0001'
+    """
+    return siniestros.detalle(numero_siniestro)
 
 
-# ═══ S2 · RAG: buscar en mis documentos (PDFs) y citar la fuente ══════════════════════
-DOCUMENTOS = DATOS / "documentos"  # PDFs ficticios de finanzas personales
+@consulta.tool_plain
+def revisar_denuncia(denuncia: DenunciaNueva) -> dict:
+    """Revisa una denuncia antes de registrarla: datos obligatorios, complementarios y documentos.
+
+    Úsala cuando ya tengas varios datos y quieras saber qué preguntar a continuación.
+    No guarda nada en la base.
+
+    Args:
+        denuncia: datos reunidos hasta el momento en la conversación
+    """
+    return siniestros.faltantes(denuncia)
+
+
+@consulta.tool_plain
+def requisitos_documentales(ramo: Ramo) -> dict:
+    """Documentos que se acostumbra pedir para denunciar un siniestro de un ramo.
+
+    Args:
+        ramo: ramo del seguro
+    """
+    return {
+        "ramo": ramo,
+        "documentos": siniestros.documentacion_para(ramo),
+        "fuente": "instructivo interno de requisitos por ramo",
+    }
+
+
+# ═══ S2 · RAG: buscar en los PDFs de procedimientos y generar documentos de apoyo ════
+DOCUMENTOS = DATOS / "documentos"  # manuales, requisitos y formularios ficticios
 
 
 def embeddings_de(textos: list[str]) -> list[list[float]]:
@@ -164,7 +184,7 @@ def indice():
     return coleccion
 
 
-def buscar(pregunta: str, k: int = 3) -> list[dict]:
+def buscar_documentos_en_pdfs(pregunta: str, k: int = 3) -> list[dict]:
     """Los k trozos más parecidos a la pregunta, con su fuente y su similitud (1 = idéntico)."""
     r = indice().query(query_embeddings=embeddings_de([pregunta]), n_results=k)
     return [
@@ -174,21 +194,43 @@ def buscar(pregunta: str, k: int = 3) -> list[dict]:
 
 
 documentos = Capability(
-    id="mis_documentos",
-    description="Documentos de finanzas personales: contratos, facturas y garantías",
+    id="documentos_siniestros",
+    description="Manuales y requisitos de siniestros en PDF, y generación de guías y comprobantes",
     # Citar la fuente y admitir cuando no hay datos: así se ve qué sale de los documentos y qué no
     instructions=(
-        "Para preguntas sobre pagos, contratos o garantías usa buscar_documentos y cita la fuente "
-        "entre corchetes, por ejemplo [contrato_alquiler-1]. "
-        "Si no hay información suficiente para responder, di que no lo encuentras, no lo inventes."
+        "Para preguntas sobre procedimientos, requisitos o formularios usa buscar_documentos y cita "
+        "la fuente entre corchetes, por ejemplo [manual_denuncia_siniestros-1]. "
+        "Si no hay información suficiente, di que no lo encuentras, no lo inventes. "
+        "Puedes generar una guía con generar_guia_denuncia y un comprobante con generar_comprobante. "
+        "Presenta esos PDFs como documentos de apoyo, nunca como una aprobación del siniestro."
     ),
 )
 
 
 @documentos.tool_plain
 def buscar_documentos(pregunta: str) -> list[dict]:
-    """Busca en los documentos los fragmentos que responden a la pregunta."""
-    resultados = buscar(pregunta, k=3)
+    """Busca en los PDFs de procedimientos los fragmentos que responden a la pregunta."""
+    resultados = buscar_documentos_en_pdfs(pregunta, k=3)
     for r in resultados:  # en la terminal (o en los Logs de Render) se ve qué recuperó
         print(f"  📄 {r['fuente']} (similitud {r['similitud']})", flush=True)
     return resultados
+
+
+@documentos.tool_plain
+def generar_comprobante(numero_siniestro: str) -> dict:
+    """Genera el PDF del comprobante de recepción de una denuncia ya registrada.
+
+    Args:
+        numero_siniestro: número exacto devuelto al registrar, por ejemplo 'SIN-2026-0001'
+    """
+    return siniestros.generar_comprobante(numero_siniestro)
+
+
+@documentos.tool_plain
+def generar_guia_denuncia(ramo: Ramo) -> dict:
+    """Genera un PDF con los pasos y documentos para denunciar un siniestro de un ramo.
+
+    Args:
+        ramo: ramo del seguro
+    """
+    return siniestros.generar_guia(ramo)

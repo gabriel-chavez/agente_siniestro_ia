@@ -2,6 +2,8 @@
 
 Este repositorio es la plantilla del trabajo final del curso «Más allá de los chatbots» (Alex Ojeda Copa): el asistente de clase con **Pydantic AI 2.59**, usado por **Telegram** y desplegado en **Render**. La persona que te pide ayuda está aprendiendo, y su tarea es hacerlo funcionar y personalizarlo (tema, datos, tools nuevas).
 
+En esta copia el tema es **agente_siniestro_ia**: recepción, consulta y seguimiento de denuncias de siniestros. El dominio (modelo Pydantic, SQLite, historial y PDFs) está en `siniestros.py`; las tools y el RAG en `capacidades.py`; las instrucciones del agente en `asistente.py`. No cambies el flujo de resumen y confirmación antes de registrar, ni el aviso de posibles duplicados, ni la lista de permitidos.
+
 **Antes de proponer o cambiar código, lee `.agents/skills/asistente-pydantic-ai/SKILL.md`** y la referencia que corresponda en esa carpeta.
 
 ## Reglas mínimas

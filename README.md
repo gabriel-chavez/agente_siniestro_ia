@@ -1,18 +1,40 @@
-# Mi asistente
+# agente_siniestro_ia
 
-Plantilla del trabajo final del curso **«Más allá de los chatbots»** de Alex Ojeda Copa. Es el asistente que armamos en clase con [Pydantic AI](https://pydantic.dev/docs/ai/), convertido en un **bot de Telegram** desplegado gratis en **Render**.
+Asistente especializado en la **recepción, consulta y seguimiento de denuncias de siniestros** de seguros. Está construido con [Pydantic AI](https://pydantic.dev/docs/ai/) sobre la plantilla del curso **«Más allá de los chatbots»** de Alex Ojeda Copa, y se usa como **bot de Telegram** (o desde la terminal).
 
-| Ya trae | Sesión | Dónde |
-|---|---|---|
-| Tools de lectura con APIs públicas (inflación del Banco Mundial, clima de Open Meteo) | S1 | `capacidades.py` → `apis` |
-| Mi contador: gastos en SQLite, una tool que lee y otra que escribe | S1 | `capacidades.py` → `consulta` y `registro` |
-| RAG: buscar en PDFs y citar la fuente | S2 | `capacidades.py` → `documentos` |
-| El agente y su núcleo async: `responder(mensaje)` | S5 | `asistente.py` |
-| El bot de Telegram con lista de permitidos: *polling* en tu equipo y webhook en Render | S5 | `bot.py` |
+Ramos atendidos: **SOAT, SOATC, Seguro de Vida, Accidentes Personales y Seguro Automotor**. Los datos de práctica son ficticios.
 
-El asistente **no tiene memoria**: cada mensaje empieza de cero.
+| Qué hace | Dónde |
+|---|---|
+| Recepción progresiva de la denuncia: extrae datos y pregunta solo lo que falta | `asistente.py` (instrucciones) |
+| Registro en SQLite con número único, estado inicial e historial | `capacidades.py` → `registro`, `siniestros.py` |
+| Consulta por número, póliza, documento, nombre, fecha, ramo o estado | `capacidades.py` → `consulta` |
+| Seguimiento con historial de estados | `capacidades.py` → `consulta` |
+| RAG sobre manuales, requisitos y formularios en PDF | `capacidades.py` → `documentos` |
+| Generación de comprobantes y guías en PDF | `siniestros.py` (con `fpdf2`) |
+| Bot de Telegram con lista de permitidos y memoria por chat | `bot.py` |
+
+La conversación se guarda **por chat**: el agente recuerda lo que ya contaste y no repite preguntas. Cada denuncia confirmada se guarda en `datos/siniestros.db`.
 
 Lo que tienes que hacer y cómo se califica está en **[TRABAJO_FINAL.md](TRABAJO_FINAL.md)**.
+
+## Flujo de una denuncia
+
+1. La persona describe el siniestro en lenguaje natural.
+2. El agente extrae los datos y pregunta, de una en una, por lo que falta.
+3. Muestra un **RESUMEN DE DENUNCIA** con estado `PENDIENTE DE CONFIRMACIÓN`.
+4. Si la persona confirma, se registra y recibe un número `SIN-AAAA-0001`.
+5. El agente entrega el comprobante, la documentación pendiente y aclara que el caso pasa a evaluación.
+6. Consultas posteriores: por número de siniestro, póliza, documento, nombre, fecha, ramo o estado.
+
+Comandos del bot:
+
+| Comando | Qué hace |
+|---|---|
+| `/start` | Presentación y número de chat |
+| `/reiniciar` | Olvida la conversación de ese chat (no borra denuncias) |
+| `/autor` | Indica quién creó el asistente |
+| `/comprobante SIN-2026-0001` | Envía el PDF del comprobante de recepción |
 
 ---
 
@@ -45,11 +67,12 @@ uv sync                  # instala Python 3.14 y las dependencias en .venv/
 uv run asistente.py      # conversa en la terminal; «salir» para terminar
 ```
 
-Prueba estas preguntas:
-- «¿Qué temperatura hace en Cochabamba?»
-- «¿Cuál fue la inflación de Bolivia en 2023?»
-- «¿Cuánto gasté en transporte?» y luego «Registra 35 Bs de almuerzo hoy».
-- «Se me cayó la laptop, ¿la cubre la garantía?»: busca en los PDFs y cita `[garantia_laptop-1]`.
+Prueba estas conversaciones:
+- «Quiero denunciar un choque ocurrido ayer a las 15:30 en La Paz. Hubo dos heridos leves» y responde las preguntas que falten.
+- «¿Qué documentos necesito para una denuncia de SOAT?»: busca en los PDFs y cita la fuente.
+- «Busca una denuncia con el documento 6543210» (dato ficticio del CSV).
+- «Muéstrame el seguimiento de SIN-2026-0001».
+- «Genera la guía para denunciar un siniestro automotor».
 
 Para comprobar el código sin gastar cuota del modelo, corre `uv run pytest`.
 
@@ -138,20 +161,20 @@ En Render, el mismo `bot.py` funciona con **webhook**: Telegram envía cada mens
 | Límite | Qué significa |
 |---|---|
 | **Se duerme** tras 15 minutos sin mensajes | El primer mensaje tarda alrededor de un minuto en responder; los siguientes son rápidos |
-| **El disco es efímero** | Al dormirse o redesplegar, `gastos.db` vuelve a crearse desde `gastos.csv`: los gastos registrados se pierden |
+| **El disco es efímero** | Al dormirse o redesplegar, `siniestros.db` vuelve a crearse desde `siniestros.csv`: las denuncias registradas se pierden. Para conservarlas, usa un disco de Render o una base externa |
 | 512 MB de memoria | Alcanza con Gemini; Ollama no cabe |
 | La cuota de Gemini gratis es **diaria** | Si el bot dice «Algo falló», mira los *Logs*: un `429` es cuota. Espera o cambia `GEMINI_MODEL` |
 
-## 5 · Hazlo tuyo
+## 5 · Personalización
 
-- **Instrucciones** (`asistente.py`): para quién es, qué hace y qué no.
-- **Datos** (`datos/`): tu propio `gastos.csv` (o la tabla que quieras) y tus PDFs, ficticios.
-- **Tools y capabilities** (`capacidades.py`): agrega las tuyas y enchúfalas en `asistente.py`, en `capabilities=[...]`. Ideas:
-  - otra API pública;
-  - búsqueda web (S2);
-  - un servidor MCP (S3);
-  - un flujo con un grafo (S4).
+- **Instrucciones** (`asistente.py`): identidad, alcance, reglas de conversación y formatos de respuesta del agente.
+- **Datos** (`datos/`): `siniestros.csv` trae seis denuncias ficticias; `documentos/*.pdf` trae el manual, los requisitos, el formulario y las guías. Reemplázalos por los de tu aseguradora.
+- **Modelo de datos** (`siniestros.py`): `DenunciaNueva` y `Denuncia` (Pydantic), la tabla SQLite y el historial de estados. Si agregas un ramo, actualiza `Ramo`, `REQUISITOS` y la lista de ramos de las instrucciones.
+- **Tools y capabilities** (`capacidades.py`): agrega las tuyas y enchúfalas en `asistente.py`, en `capabilities=[...]`.
+- **PDFs de práctica:** se regeneran con `uv run python scripts/generar_documentos.py`.
 - **Dependencias:** `uv add nombre-paquete`, nunca a mano. Luego haz commit de `pyproject.toml` y `uv.lock`.
+
+> **Estados del siniestro:** BORRADOR, PENDIENTE_DE_INFORMACION, REGISTRADO, EN_REVISION, DOCUMENTACION_PENDIENTE, OBSERVADO, APROBADO, RECHAZADO y CERRADO. El agente no decide cobertura, indemnizaciones ni responsabilidades legales; solo registra y orienta.
 
 > **Extra opcional:** si además quieres usar tu asistente como API HTTP, sigue [API.md](API.md). No hace falta para el trabajo final.
 
@@ -183,11 +206,13 @@ La IA te ayuda, pero el código es tuyo: entiende cada cambio antes de aceptarlo
 
 ```
 ├── config.py           la configuración (.env o Render) y el modelo
-├── capacidades.py      apis, consulta, registro y documentos  ← aquí van las tuyas
-├── asistente.py        el agente y responder(mensaje)
-├── bot.py              Telegram: /start, permitidos, polling o webhook
+├── siniestros.py       modelo Pydantic, SQLite, historial y PDFs  ← el dominio
+├── capacidades.py      registro, consulta, documentos y RAG       ← las tools
+├── asistente.py        el agente, sus instrucciones y responder(mensaje, conversacion)
+├── bot.py              Telegram: /start, /reiniciar, /comprobante, permitidos y memoria
 ├── api.py              extra opcional: la API HTTP (ver API.md)
-├── datos/              gastos.csv y documentos/*.pdf (ficticios)
+├── datos/              siniestros.csv, documentos/*.pdf y generados/ (ficticios)
+├── scripts/            genera los PDFs ficticios de procedimientos
 ├── tests/              pruebas sin modelo real
 ├── pyproject.toml      dependencias (uv.lock las fija)
 ├── .python-version     Python 3.14 (lo leen uv y Render)
@@ -201,4 +226,4 @@ La IA te ayuda, pero el código es tuyo: entiende cada cambio antes de aceptarlo
 
 ---
 
-Autor: **Alex Ojeda Copa**. Código bajo licencia [MIT](LICENSE).
+Plantilla original: **Alex Ojeda Copa**. Adaptación **agente_siniestro_ia**: **Gabriel Chavez Pc**. Código bajo licencia [MIT](LICENSE).

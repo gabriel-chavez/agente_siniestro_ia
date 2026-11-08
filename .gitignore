@@ -6,8 +6,11 @@
 __pycache__/
 .pytest_cache/
 
-# La base se crea desde datos/gastos.csv al usarse
+# La base se crea desde datos/siniestros.csv al usarse
 *.db
+
+# PDFs que genera el agente (comprobantes y guías)
+datos/generados/
 
 # Sistema
 .DS_Store
