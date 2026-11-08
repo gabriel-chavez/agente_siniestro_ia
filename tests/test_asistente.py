@@ -23,6 +23,7 @@ import asistente  # noqa: E402
 import bot  # noqa: E402
 import capacidades  # noqa: E402
 import siniestros  # noqa: E402
+import web  # noqa: E402
 from config import settings  # noqa: E402
 
 COMPLETA = {
@@ -54,6 +55,10 @@ def base_temporal(tmp_path, monkeypatch):
     """Cada prueba usa su propia siniestros.db y su carpeta de PDFs, no las de datos/."""
     monkeypatch.setattr(siniestros, "DB", tmp_path / "siniestros.db")
     monkeypatch.setattr(siniestros, "GENERADOS", tmp_path / "generados")
+    web.CONVERSACIONES.clear()
+    web.USOS.clear()
+    web.USO_DIA.clear()
+    web.USO_GLOBAL.update({"dia": date.today(), "cuenta": 0})
 
 
 def pide(tool: str, args: dict) -> FunctionModel:
@@ -322,3 +327,67 @@ async def test_api_con_token_responde(monkeypatch):
         r = await post_chat({"mensaje": "¿Existe una denuncia con documento 6543210?"}, "def")
     assert r.status_code == 200
     assert "SIN-2026-0001" in r.json()["texto"]
+
+
+# ── Demo web pública ──
+
+
+async def post_demo(cuerpo: dict, ip: str | None = None) -> httpx.Response:
+    """Llama a la demo web en el mismo proceso, sin servidor ni red."""
+    cabeceras = {"X-Forwarded-For": ip} if ip else {}
+    transporte = httpx.ASGITransport(app=web.app)
+    async with httpx.AsyncClient(transport=transporte, base_url="http://prueba") as cliente:
+        return await cliente.post("/demo/chat", json=cuerpo, headers=cabeceras)
+
+
+async def test_demo_web_sirve_la_pagina():
+    transporte = httpx.ASGITransport(app=web.app)
+    async with httpx.AsyncClient(transport=transporte, base_url="http://prueba") as cliente:
+        r = await cliente.get("/")
+    assert r.status_code == 200
+    assert "Demo pública" in r.text and "Agente de siniestros" in r.text
+
+
+async def test_demo_web_responde_sin_token():
+    with asistente.asistente.override(model=pide("buscar_siniestros", {"documento": "6543210"})):
+        r = await post_demo({"sesion": "sesion-demo-0001", "mensaje": "Busca el documento 6543210"})
+    assert r.status_code == 200
+    assert "SIN-2026-0001" in r.json()["texto"]
+
+
+async def test_demo_web_limita_por_minuto(monkeypatch):
+    monkeypatch.setattr(web, "LIMITE_POR_MINUTO", 1)
+
+    def modelo_falso(mensajes, info):
+        return ModelResponse(parts=[TextPart("ok")])
+
+    with asistente.asistente.override(model=FunctionModel(modelo_falso)):
+        primera = await post_demo({"sesion": "sesion-demo-0002", "mensaje": "Hola"})
+        segunda = await post_demo({"sesion": "sesion-demo-0003", "mensaje": "Hola otra vez"})
+    assert primera.status_code == 200
+    assert segunda.status_code == 429
+
+
+async def test_demo_web_limite_global_protege_la_cuota(monkeypatch):
+    monkeypatch.setattr(web, "LIMITE_GLOBAL_DIA", 1)
+
+    def modelo_falso(mensajes, info):
+        return ModelResponse(parts=[TextPart("ok")])
+
+    with asistente.asistente.override(model=FunctionModel(modelo_falso)):
+        primera = await post_demo({"sesion": "sesion-global-01", "mensaje": "Hola"}, ip="1.1.1.1")
+        segunda = await post_demo({"sesion": "sesion-global-02", "mensaje": "Hola"}, ip="2.2.2.2")
+    assert primera.status_code == 200
+    assert segunda.status_code == 429
+
+
+async def test_demo_web_reinicia_sesion():
+    with asistente.asistente.override(model=pide("buscar_siniestros", {"documento": "6543210"})):
+        await post_demo({"sesion": "sesion-demo-0004", "mensaje": "Busca"})
+    assert "sesion-demo-0004" in web.CONVERSACIONES
+
+    transporte = httpx.ASGITransport(app=web.app)
+    async with httpx.AsyncClient(transport=transporte, base_url="http://prueba") as cliente:
+        r = await cliente.post("/demo/reiniciar", json={"sesion": "sesion-demo-0004"})
+    assert r.status_code == 200
+    assert "sesion-demo-0004" not in web.CONVERSACIONES

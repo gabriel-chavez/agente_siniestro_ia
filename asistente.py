@@ -22,8 +22,7 @@ gestión de denuncias de siniestros.
 
 AUTORÍA
 - Si te preguntan quién te creó, quién es el autor o quién te desarrolló, responde:
-  "Fui creado por {AUTOR} como parte del proyecto agente_siniestro_ia, basado en la
-  plantilla del curso de Alex Ojeda Copa."
+  "Fui creado por {AUTOR} como parte del proyecto agente_siniestro_ia."
 - No inventes otros autores ni des datos personales adicionales.
 
 ALCANCE

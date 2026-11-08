@@ -105,6 +105,34 @@ Abre tu bot en Telegram (el enlace `t.me/…_bot` que te dio BotFather) y pulsa 
 
 En tu equipo, el bot funciona por ***polling***: le pregunta a Telegram cada poco si hay mensajes. Si apagas la computadora, se apaga el bot. Para que esté siempre disponible, súbelo a Render.
 
+## 3.5 · Demo web pública (opcional)
+
+Además del bot, el proyecto trae `web.py`: una página de chat para que **cualquier persona** pruebe el agente desde el navegador, sin Telegram y sin token.
+
+```bash
+uv run uvicorn web:app --reload     # http://127.0.0.1:8000
+```
+
+En Render, crea un **segundo Web Service** del mismo repositorio:
+
+| Campo | Valor |
+|---|---|
+| **Name** | `agente-siniestro-web` |
+| **Build Command** | `uv sync --locked --no-dev` |
+| **Start Command** | `uv run --no-sync uvicorn web:app --host 0.0.0.0 --port $PORT` |
+| **Instance Type** | **Free** |
+| **Environment** | `GEMINI_API_KEY_LOCAL` |
+
+La URL será algo como `https://agente-siniestro-web.onrender.com`. Si usas el **Blueprint** de `render.yaml`, los dos servicios se crean juntos.
+
+Límites de la demo (en memoria, por IP):
+
+- 8 mensajes por minuto y 80 por día.
+- 30 mensajes por sesión del navegador.
+- Hasta 500 sesiones simultáneas.
+
+> **Es una demo pública.** Sirve para datos ficticios: no escribas nombres, documentos, teléfonos ni información real. Consume tu cuota de Gemini, el servicio Free se duerme tras 15 minutos sin uso y las denuncias de prueba se guardan en una base compartida que se pierde al reiniciar. La API protegida con `API_TOKENS` sigue siendo `api.py`; la demo es `web.py`.
+
 ## 4 · Despliegue en Render (paso a paso, a mano)
 
 **4.1 · Sube tu código a GitHub**
@@ -209,8 +237,9 @@ La IA te ayuda, pero el código es tuyo: entiende cada cambio antes de aceptarlo
 ├── siniestros.py       modelo Pydantic, SQLite, historial y PDFs  ← el dominio
 ├── capacidades.py      registro, consulta, documentos y RAG       ← las tools
 ├── asistente.py        el agente, sus instrucciones y responder(mensaje, conversacion)
-├── bot.py              Telegram: /start, /reiniciar, /comprobante, permitidos y memoria
-├── api.py              extra opcional: la API HTTP (ver API.md)
+├── bot.py              Telegram: /start, /reiniciar, /autor, /comprobante, permitidos y memoria
+├── web.py              demo web pública con límites de uso (opcional)
+├── api.py              extra opcional: la API HTTP protegida (ver API.md)
 ├── datos/              siniestros.csv, documentos/*.pdf y generados/ (ficticios)
 ├── scripts/            genera los PDFs ficticios de procedimientos
 ├── tests/              pruebas sin modelo real
